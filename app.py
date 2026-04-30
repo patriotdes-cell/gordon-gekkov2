@@ -1,46 +1,38 @@
+
 import streamlit as st
 import os
-from datetime import datetime
-from zoneinfo import ZoneInfo  # Modern replacement for pytz
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import pandas as pd
+import yfinance as yf
 
-# Alpaca imports
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetAssetsRequest, MarketOrderRequest
-from alpaca.trading.enums import OrderSide, OrderType, TimeInForce, AssetClass
+from alpaca.trading.requests import MarketOrderRequest, GetPortfolioHistoryRequest
+from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
 
-# ====================== CONFIG ======================
-st.set_page_config(
-    page_title="Gordon",
-    page_icon="💰",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Gordon Gekko", layout="wide", page_icon="💰")
 
-st.title("💼 Gordon Gekko Trading Dashboard")
-st.markdown("**Wall Street never sleeps.**")
+st.title("💼 Gordon Gekko Trading Terminal")
+st.markdown("**The game is rigged. Play it anyway.**")
 
-# ====================== SIDEBAR ======================
-with st.sidebar:
-    st.header("🔑 Alpaca Credentials")
-    api_key = st.text_input("API Key", type="password", value=os.getenv("ALPACA_API_KEY", ""))
-    secret_key = st.text_input("Secret Key", type="password", value=os.getenv("ALPACA_SECRET_KEY", ""))
-    is_paper = st.checkbox("Paper Trading", value=True)
-    
-    if st.button("Connect"):
-        st.session_state.connected = True
-        st.success("Connected to Alpaca!")
+# Load secrets
+api_key = st.secrets.get("ALPACA_API_KEY")
+secret_key = st.secrets.get("ALPACA_SECRET_KEY")
+paper = st.secrets.get("ALPACA_PAPER", "true").lower() == "true"
 
-# ====================== MAIN APP ======================
-if "connected" not in st.session_state:
-    st.info("👈 Enter your Alpaca credentials in the sidebar to get started.")
+if not api_key or not secret_key:
+    st.error("❌ Missing Alpaca credentials in Secrets")
     st.stop()
 
+# Connect to Alpaca
+@st.cache_resource
+def get_client():
+    return TradingClient(api_key, secret_key, paper=paper)
+
+client = get_client()
+
 try:
-    trading_client = TradingClient(api_key, secret_key, paper=is_paper)
-    
-    # Account Info
-    account = trading_client.get_account()
-    
+    account = client.get_account()
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Equity", f"${float(account.equity):,.2f}")
@@ -49,55 +41,116 @@ try:
     with col3:
         st.metric("Cash", f"${float(account.cash):,.2f}")
     with col4:
-        st.metric("Portfolio Value", f"${float(account.portfolio_value):,.2f}")
-
-    # Current Time (NY timezone - market hours)
-    ny_time = datetime.now(ZoneInfo("America/New_York"))
-    st.caption(f"🕒 New York Time: {ny_time.strftime('%Y-%m-%d %H:%M:%S')}")
-
-    # Positions
-    st.subheader("📊 Current Positions")
-    positions = trading_client.get_all_positions()
-    
-    if positions:
-        pos_data = []
-        for p in positions:
-            pos_data.append({
-                "Symbol": p.symbol,
-                "Qty": float(p.qty),
-                "Avg Price": float(p.avg_entry_price),
-                "Market Value": float(p.market_value),
-                "Unrealized P/L": float(p.unrealized_pl),
-                "Unrealized P/L %": float(p.unrealized_plpc) * 100
-            })
-        st.dataframe(pos_data, use_container_width=True)
-    else:
-        st.info("No open positions yet.")
-
-    # Quick Trade Section
-    st.subheader("⚡ Quick Market Order")
-    col_a, col_b = st.columns([3, 1])
-    with col_a:
-        symbol = st.text_input("Symbol", value="AAPL", max_chars=10).upper()
-    with col_b:
-        side = st.selectbox("Side", ["Buy", "Sell"])
-    
-    qty = st.number_input("Quantity", min_value=1, value=1)
-    
-    if st.button("🚀 Place Market Order", type="primary"):
-        order_data = MarketOrderRequest(
-            symbol=symbol,
-            qty=qty,
-            side=OrderSide.BUY if side == "Buy" else OrderSide.SELL,
-            type=OrderType.MARKET,
-            time_in_force=TimeInForce.DAY
-        )
-        order = trading_client.submit_order(order_data)
-        st.success(f"Order submitted! ID: {order.id}")
-
+        st.metric("Mode", "🟢 PAPER" if paper else "🔴 LIVE")
 except Exception as e:
-    st.error(f"Error: {e}")
-    st.info("Double-check your API keys and internet connection.")
+    st.error(f"Alpaca Error: {e}")
+    st.stop()
 
-# Footer
-st.caption("Made with ❤️ for the Gordon Gekko vibe | Powered by Alpaca + Streamlit")
+ny_time = datetime.now(ZoneInfo("America/New_York"))
+st.caption(f"🕒 New York Time: {ny_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+# ====================== WATCHLIST ======================
+st.subheader("📋 Watchlist")
+watchlist_symbols = st.multiselect("Add symbols to watchlist", 
+                                 ["AAPL", "TSLA", "NVDA", "AMZN", "GOOGL", "SPY", "QQQ"], 
+                                 default=["AAPL", "TSLA", "NVDA"])
+
+# ====================== CHARTS & SIGNALS ======================
+st.subheader("📈 Live Charts + Signals")
+symbol = st.text_input("Enter Symbol for Chart", value="AAPL").upper().strip()
+
+if symbol:
+    with st.spinner(f"Loading {symbol}..."):
+        data = yf.download(symbol, period="1mo", interval="1d")
+        
+        if not data.empty:
+            col_chart, col_signals = st.columns([3, 1])
+            
+            with col_chart:
+                st.line_chart(data['Close'], use_container_width=True)
+            
+            with col_signals:
+                # Simple Trading Signals
+                data['MA50'] = data['Close'].rolling(50).mean()
+                data['MA200'] = data['Close'].rolling(200).mean()
+                
+                latest = data.iloc[-1]
+                prev = data.iloc[-2] if len(data) > 1 else latest
+                
+                signal = "🟢 BULLISH" if latest['MA50'] > latest['MA200'] else "🔴 BEARISH"
+                st.metric("Signal", signal)
+                st.metric("Price", f"${latest['Close']:.2f}")
+                st.metric("Change", f"{((latest['Close']/prev['Close'])-1)*100:.2f}%")
+                
+                if st.button(f"🚀 Quick Buy {symbol}", type="primary"):
+                    try:
+                        order = MarketOrderRequest(
+                            symbol=symbol,
+                            qty=1,
+                            side=OrderSide.BUY,
+                            type=OrderType.MARKET,
+                            time_in_force=TimeInForce.DAY
+                        )
+                        client.submit_order(order)
+                        st.success(f"✅ Buy order for {symbol} submitted!")
+                    except Exception as e:
+                        st.error(f"Order failed: {e}")
+                
+                if st.button(f"🔻 Quick Sell {symbol}"):
+                    try:
+                        order = MarketOrderRequest(
+                            symbol=symbol,
+                            qty=1,
+                            side=OrderSide.SELL,
+                            type=OrderType.MARKET,
+                            time_in_force=TimeInForce.DAY
+                        )
+                        client.submit_order(order)
+                        st.success(f"✅ Sell order for {symbol} submitted!")
+                    except Exception as e:
+                        st.error(f"Order failed: {e}")
+        else:
+            st.error("Could not load chart data.")
+
+# ====================== PORTFOLIO PERFORMANCE ======================
+st.subheader("📊 Portfolio Performance")
+try:
+    # Get portfolio history
+    history = client.get_portfolio_history(
+        timeframe="1D",
+        limit=100,
+        extended_hours=False
+    )
+    
+    if history and history.equity:
+        df_hist = pd.DataFrame({
+            'timestamp': history.timestamp,
+            'equity': history.equity
+        })
+        df_hist['timestamp'] = pd.to_datetime(df_hist['timestamp'], unit='s')
+        st.line_chart(df_hist.set_index('timestamp')['equity'], use_container_width=True)
+    else:
+        st.info("Portfolio history not available yet.")
+except Exception as e:
+    st.info(f"Portfolio history: {e}")
+
+# ====================== CURRENT POSITIONS ======================
+st.subheader("📍 Current Positions")
+try:
+    positions = client.get_all_positions()
+    if positions:
+        pos_df = pd.DataFrame([{
+            'Symbol': p.symbol,
+            'Qty': float(p.qty),
+            'Avg Price': float(p.avg_entry_price),
+            'Market Value': float(p.market_value),
+            'Unrealized P/L': float(p.unrealized_pl),
+            'P/L %': round(float(p.unrealized_plpc) * 100, 2)
+        } for p in positions])
+        st.dataframe(pos_df, use_container_width=True)
+    else:
+        st.info("No open positions.")
+except Exception as e:
+    st.warning("Could not load positions.")
+
+st.caption("Gordon Gekko V2 • All Features Unlocked • Stay dangerous")

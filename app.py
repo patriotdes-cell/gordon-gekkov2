@@ -1,4 +1,3 @@
-
 import streamlit as st
 import os
 from datetime import datetime, timedelta
@@ -7,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, GetPortfolioHistoryRequest
+from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, OrderType, TimeInForce
 
 st.set_page_config(page_title="Gordon Gekko", layout="wide", page_icon="💰")
@@ -51,7 +50,7 @@ st.caption(f"🕒 New York Time: {ny_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 # ====================== WATCHLIST ======================
 st.subheader("📋 Watchlist")
-watchlist_symbols = st.multiselect("Add symbols to watchlist", 
+watchlist_symbols = st.multiselect("Add symbols", 
                                  ["AAPL", "TSLA", "NVDA", "AMZN", "GOOGL", "SPY", "QQQ"], 
                                  default=["AAPL", "TSLA", "NVDA"])
 
@@ -61,80 +60,70 @@ symbol = st.text_input("Enter Symbol for Chart", value="AAPL").upper().strip()
 
 if symbol:
     with st.spinner(f"Loading {symbol}..."):
-        data = yf.download(symbol, period="1mo", interval="1d")
+        # Use 6 months so MA200 works
+        data = yf.download(symbol, period="6mo", interval="1d", progress=False)
         
         if not data.empty:
+            # Calculate MAs safely
+            data['MA50'] = data['Close'].rolling(window=50).mean()
+            data['MA200'] = data['Close'].rolling(window=200).mean()
+            
+            latest = data.iloc[-1]
+            
+            # Safe signal logic
+            if pd.isna(latest['MA50']) or pd.isna(latest['MA200']):
+                signal = "⏳ Not enough data for signal"
+                signal_color = "⚪"
+            elif latest['MA50'] > latest['MA200']:
+                signal = "🟢 BULLISH"
+                signal_color = "🟢"
+            else:
+                signal = "🔴 BEARISH"
+                signal_color = "🔴"
+            
             col_chart, col_signals = st.columns([3, 1])
             
             with col_chart:
                 st.line_chart(data['Close'], use_container_width=True)
             
             with col_signals:
-                # Simple Trading Signals
-                data['MA50'] = data['Close'].rolling(50).mean()
-                data['MA200'] = data['Close'].rolling(200).mean()
-                
-                latest = data.iloc[-1]
-                prev = data.iloc[-2] if len(data) > 1 else latest
-                
-                signal = "🟢 BULLISH" if latest['MA50'] > latest['MA200'] else "🔴 BEARISH"
                 st.metric("Signal", signal)
-                st.metric("Price", f"${latest['Close']:.2f}")
-                st.metric("Change", f"{((latest['Close']/prev['Close'])-1)*100:.2f}%")
+                st.metric("Current Price", f"${latest['Close']:.2f}")
+                change = ((latest['Close'] / data.iloc[-2]['Close']) - 1) * 100 if len(data) > 1 else 0
+                st.metric("Daily Change", f"{change:.2f}%")
                 
-                if st.button(f"🚀 Quick Buy {symbol}", type="primary"):
+                # Quick orders
+                if st.button(f"🚀 Quick Buy 1 {symbol}", type="primary"):
                     try:
-                        order = MarketOrderRequest(
-                            symbol=symbol,
-                            qty=1,
-                            side=OrderSide.BUY,
-                            type=OrderType.MARKET,
-                            time_in_force=TimeInForce.DAY
-                        )
+                        order = MarketOrderRequest(symbol=symbol, qty=1, side=OrderSide.BUY,
+                                                 type=OrderType.MARKET, time_in_force=TimeInForce.DAY)
                         client.submit_order(order)
-                        st.success(f"✅ Buy order for {symbol} submitted!")
+                        st.success(f"✅ Buy order submitted for {symbol}!")
                     except Exception as e:
-                        st.error(f"Order failed: {e}")
+                        st.error(f"Buy failed: {e}")
                 
-                if st.button(f"🔻 Quick Sell {symbol}"):
+                if st.button(f"🔻 Quick Sell 1 {symbol}"):
                     try:
-                        order = MarketOrderRequest(
-                            symbol=symbol,
-                            qty=1,
-                            side=OrderSide.SELL,
-                            type=OrderType.MARKET,
-                            time_in_force=TimeInForce.DAY
-                        )
+                        order = MarketOrderRequest(symbol=symbol, qty=1, side=OrderSide.SELL,
+                                                 type=OrderType.MARKET, time_in_force=TimeInForce.DAY)
                         client.submit_order(order)
-                        st.success(f"✅ Sell order for {symbol} submitted!")
+                        st.success(f"✅ Sell order submitted for {symbol}!")
                     except Exception as e:
-                        st.error(f"Order failed: {e}")
+                        st.error(f"Sell failed: {e}")
         else:
-            st.error("Could not load chart data.")
+            st.error(f"Could not load data for {symbol}")
 
-# ====================== PORTFOLIO PERFORMANCE ======================
+# ====================== PORTFOLIO & POSITIONS ======================
 st.subheader("📊 Portfolio Performance")
 try:
-    # Get portfolio history
-    history = client.get_portfolio_history(
-        timeframe="1D",
-        limit=100,
-        extended_hours=False
-    )
-    
+    history = client.get_portfolio_history(timeframe="1D", limit=100)
     if history and history.equity:
-        df_hist = pd.DataFrame({
-            'timestamp': history.timestamp,
-            'equity': history.equity
-        })
-        df_hist['timestamp'] = pd.to_datetime(df_hist['timestamp'], unit='s')
-        st.line_chart(df_hist.set_index('timestamp')['equity'], use_container_width=True)
-    else:
-        st.info("Portfolio history not available yet.")
-except Exception as e:
-    st.info(f"Portfolio history: {e}")
+        df = pd.DataFrame({'timestamp': history.timestamp, 'equity': history.equity})
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+        st.line_chart(df.set_index('timestamp')['equity'])
+except:
+    st.info("Portfolio history loading...")
 
-# ====================== CURRENT POSITIONS ======================
 st.subheader("📍 Current Positions")
 try:
     positions = client.get_all_positions()
@@ -145,12 +134,12 @@ try:
             'Avg Price': float(p.avg_entry_price),
             'Market Value': float(p.market_value),
             'Unrealized P/L': float(p.unrealized_pl),
-            'P/L %': round(float(p.unrealized_plpc) * 100, 2)
+            'P/L %': round(float(p.unrealized_plpc)*100, 2)
         } for p in positions])
         st.dataframe(pos_df, use_container_width=True)
     else:
-        st.info("No open positions.")
+        st.info("No open positions yet.")
 except Exception as e:
     st.warning("Could not load positions.")
 
-st.caption("Gordon Gekko V2 • All Features Unlocked • Stay dangerous")
+st.caption("Gordon Gekko V2 • Fixed & Upgraded")

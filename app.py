@@ -1,48 +1,103 @@
 import streamlit as st
 import os
 from datetime import datetime
-import pytz
+from zoneinfo import ZoneInfo  # Modern replacement for pytz
+
+# Alpaca imports
 from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import GetAssetsRequest, MarketOrderRequest
+from alpaca.trading.enums import OrderSide, OrderType, TimeInForce, AssetClass
 
-st.set_page_config(page_title="Gordon Gekko V2", layout="wide")
-st.title("🚀 Gordon Gekko V2 — Active Trading System")
-st.caption("Soul & Doctrine Enforced | $1K → $25K Mission")
-
-# Soul Configuration
-PAPER = os.getenv("ALPACA_PAPER", "true").lower() == "true"
-client = TradingClient(
-    os.getenv("ALPACA_API_KEY"),
-    os.getenv("ALPACA_SECRET_KEY"),
-    paper=PAPER
+# ====================== CONFIG ======================
+st.set_page_config(
+    page_title="Gordon",
+    page_icon="💰",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-virtual_equity = st.session_state.get("virtual_equity", 995.0)
-st.sidebar.metric("Virtual Equity", f"${virtual_equity:.2f}", delta="Tier 1 Foundation")
-st.sidebar.caption(f"Mode: {'🟢 LIVE REAL MONEY' if not PAPER else '🔵 PAPER TRADING'}")
+st.title("💼 Gordon Gekko Trading Dashboard")
+st.markdown("**Wall Street never sleeps.**")
 
-# Heartbeat
+# ====================== SIDEBAR ======================
+with st.sidebar:
+    st.header("🔑 Alpaca Credentials")
+    api_key = st.text_input("API Key", type="password", value=os.getenv("ALPACA_API_KEY", ""))
+    secret_key = st.text_input("Secret Key", type="password", value=os.getenv("ALPACA_SECRET_KEY", ""))
+    is_paper = st.checkbox("Paper Trading", value=True)
+    
+    if st.button("Connect"):
+        st.session_state.connected = True
+        st.success("Connected to Alpaca!")
+
+# ====================== MAIN APP ======================
+if "connected" not in st.session_state:
+    st.info("👈 Enter your Alpaca credentials in the sidebar to get started.")
+    st.stop()
+
 try:
-    account = client.get_account()
-    st.success(f"✅ Connected to Alpaca | Equity: ${float(account.equity):.2f} | Status: {account.status}")
-except Exception as e:
-    st.error(f"Alpaca connection issue: {e}. Add API keys in deployment settings.")
+    trading_client = TradingClient(api_key, secret_key, paper=is_paper)
+    
+    # Account Info
+    account = trading_client.get_account()
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Equity", f"${float(account.equity):,.2f}")
+    with col2:
+        st.metric("Buying Power", f"${float(account.buying_power):,.2f}")
+    with col3:
+        st.metric("Cash", f"${float(account.cash):,.2f}")
+    with col4:
+        st.metric("Portfolio Value", f"${float(account.portfolio_value):,.2f}")
 
-if st.button("🚀 Run Trading Cycle (UTA + COS)", type="primary", use_container_width=True):
-    with st.spinner("Checking Soul gates (time, risk, positions, PDT)..."):
-        st.info("✅ Market hours OK | Risk <2% | No conflicts | PDT safe")
-        # Real UTA + COS logic will go here (next step)
-        st.success("Cycle executed. Virtual equity updated per rules.")
-        st.session_state.virtual_equity = virtual_equity + 12.50
+    # Current Time (NY timezone - market hours)
+    ny_time = datetime.now(ZoneInfo("America/New_York"))
+    st.caption(f"🕒 New York Time: {ny_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-st.subheader("Current Positions")
-try:
-    positions = client.get_all_positions()
+    # Positions
+    st.subheader("📊 Current Positions")
+    positions = trading_client.get_all_positions()
+    
     if positions:
+        pos_data = []
         for p in positions:
-            st.write(f"**{p.symbol}** | Qty: {p.qty} | Avg Price: ${p.avg_entry_price} | Unrealized P&L: ${p.unrealized_pl}")
+            pos_data.append({
+                "Symbol": p.symbol,
+                "Qty": float(p.qty),
+                "Avg Price": float(p.avg_entry_price),
+                "Market Value": float(p.market_value),
+                "Unrealized P/L": float(p.unrealized_pl),
+                "Unrealized P/L %": float(p.unrealized_plpc) * 100
+            })
+        st.dataframe(pos_data, use_container_width=True)
     else:
-        st.info("No open positions.")
-except:
-    st.warning("No positions data available yet.")
+        st.info("No open positions yet.")
 
-st.caption("To go live: Set ALPACA_PAPER=false + use live keys (after paper proof)")
+    # Quick Trade Section
+    st.subheader("⚡ Quick Market Order")
+    col_a, col_b = st.columns([3, 1])
+    with col_a:
+        symbol = st.text_input("Symbol", value="AAPL", max_chars=10).upper()
+    with col_b:
+        side = st.selectbox("Side", ["Buy", "Sell"])
+    
+    qty = st.number_input("Quantity", min_value=1, value=1)
+    
+    if st.button("🚀 Place Market Order", type="primary"):
+        order_data = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.BUY if side == "Buy" else OrderSide.SELL,
+            type=OrderType.MARKET,
+            time_in_force=TimeInForce.DAY
+        )
+        order = trading_client.submit_order(order_data)
+        st.success(f"Order submitted! ID: {order.id}")
+
+except Exception as e:
+    st.error(f"Error: {e}")
+    st.info("Double-check your API keys and internet connection.")
+
+# Footer
+st.caption("Made with ❤️ for the Gordon Gekko vibe | Powered by Alpaca + Streamlit")
